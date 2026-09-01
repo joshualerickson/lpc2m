@@ -1,0 +1,3 @@
+[submodule "lidar.metrics"]
+	path = lidar.metrics
+	url = git@github.com:joshualerickson/lidar.metrics.git
