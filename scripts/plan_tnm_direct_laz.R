@@ -202,6 +202,11 @@ for (workunit in priority$workunit) {
 }
 if (!length(coverage_rows)) quit(status = 2L)
 coverage <- do.call(rbind, coverage_rows)
+# Persist only repaired coverage: union/difference can leave duplicate vertices
+# at coincident tile boundaries even though the result is topologically valid.
+coverage <- st_make_valid(coverage)
+coverage <- st_set_geometry(coverage, st_buffer(st_geometry(coverage), 0))
+coverage <- coverage[!st_is_empty(coverage), ]
 
 # Retain complete tile footprints for any tile needed by the assigned coverage
 # plus processing halo. Core assignment remains in direct_laz_coverage.

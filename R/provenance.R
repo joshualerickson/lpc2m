@@ -31,6 +31,13 @@ run_provenance <- function(aoi, output_dir = NULL, name = "lidar_provenance",
                            project_dir = getwd(), include_direct_laz = TRUE,
                            local_laz_index = NULL, local_laz_layer = NULL,
                            header_workers = 16L, buffer_m = 60, refresh = FALSE) {
+  # Keep every overlay in this resolver in GEOS.  A few published source
+  # footprints contain duplicate ring vertices; s2 errors before validity
+  # repair can be applied, whereas GEOS plus the zero-buffer repair used by
+  # validate_aoi() handles them safely.
+  use_s2 <- sf::sf_use_s2()
+  on.exit(sf::sf_use_s2(use_s2), add = TRUE)
+  sf::sf_use_s2(FALSE)
   aoi <- validate_aoi(aoi)
   if (!is.null(event_year_col) && !is.null(event_date_col)) stop("Supply event_year_col or event_date_col, not both.", call. = FALSE)
   if (!is.numeric(minimum_coverage) || length(minimum_coverage) != 1L || minimum_coverage < 0 || minimum_coverage > 1) stop("minimum_coverage must be between 0 and 1.", call. = FALSE)
@@ -45,7 +52,7 @@ run_provenance <- function(aoi, output_dir = NULL, name = "lidar_provenance",
   source_path <- file.path(project_dir, "data", "lidar_need_ept.gpkg")
   if (!file.exists(source_path)) stop("Authoritative EPT source cache is missing: ", source_path, call. = FALSE)
   sources <- sf::st_read(source_path, layer = "ept_sources", quiet = TRUE)
-  sources <- sf::st_make_valid(sf::st_transform(sources, sf::st_crs(aoi)))
+  sources <- validate_aoi(sf::st_transform(sources, sf::st_crs(aoi)))
   sources <- sources[lengths(sf::st_intersects(sources, aoi)) > 0, c("ept_name", "ept_url")]
 
   metadata <- .read_source_metadata(project_dir)
@@ -91,12 +98,12 @@ run_provenance <- function(aoi, output_dir = NULL, name = "lidar_provenance",
       header_workers = header_workers, buffer_m = buffer_m, refresh = refresh)
     if (identical(direct$status, "planned")) {
       tile_sources <- sf::st_read(direct$tiles, layer = "direct_laz_tiles", quiet = TRUE)
-      tile_sources <- sf::st_transform(tile_sources, sf::st_crs(aoi))
+      tile_sources <- validate_aoi(sf::st_transform(tile_sources, sf::st_crs(aoi)))
       source_layers <- sf::st_layers(direct$tiles)$name
       coverage_sources <- if ("direct_laz_coverage" %in% source_layers) {
         sf::st_read(direct$tiles, layer = "direct_laz_coverage", quiet = TRUE)
       } else tile_sources
-      coverage_sources <- sf::st_transform(coverage_sources, sf::st_crs(aoi))
+      coverage_sources <- validate_aoi(sf::st_transform(coverage_sources, sf::st_crs(aoi)))
       direct_candidates <- suppressWarnings(sf::st_intersection(aoi, coverage_sources))
       direct_candidates <- direct_candidates[as.numeric(sf::st_area(direct_candidates)) > 0, ]
       direct_candidates$source_type <- "direct_laz"
