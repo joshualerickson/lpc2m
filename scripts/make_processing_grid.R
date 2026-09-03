@@ -2,6 +2,9 @@
 
 # Split a single core AOI into stable, square processing blocks.
 suppressPackageStartupMessages(library(sf))
+# All processing-grid overlays use GEOS. The input may include USGS boundary
+# rings with duplicate vertices, which s2 rejects before GEOS can repair them.
+suppressMessages(sf_use_s2(FALSE))
 
 usage <- paste(
   "Usage: Rscript scripts/make_processing_grid.R --input CORE.gpkg --layer NAME",
@@ -31,7 +34,19 @@ if (!nrow(core) || is.na(st_crs(core))) stop("input must contain at least one fe
 block_m <- as.numeric(opts[["block-m"]])
 if (!is.finite(block_m) || block_m <= 0) stop("block-m must be positive.", call. = FALSE)
 
-core <- st_union(st_make_valid(core))
+# A block size is metres. Project geographic AOIs to a local metric CRS before
+# making the grid; otherwise a value such as 500 would mean 500 degrees.
+if (st_is_longlat(core)) {
+  bbox <- st_bbox(core)
+  local_crs <- paste0(
+    "+proj=laea +lat_0=", mean(c(bbox[["ymin"]], bbox[["ymax"]])),
+    " +lon_0=", mean(c(bbox[["xmin"]], bbox[["xmax"]])),
+    " +datum=WGS84 +units=m +no_defs"
+  )
+  core <- st_transform(core, local_crs)
+}
+core <- st_set_geometry(core, st_buffer(st_geometry(st_make_valid(core)), 0))
+core <- st_union(core)
 grid <- st_make_grid(core, cellsize = block_m, square = TRUE, what = "polygons")
 blocks <- st_intersection(st_as_sf(data.frame(block_id = seq_along(grid)), geometry = grid), core)
 blocks <- blocks[as.numeric(st_area(blocks)) > 0, ]

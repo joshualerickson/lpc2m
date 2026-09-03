@@ -3,6 +3,7 @@
 # Make source-specific jobs directly from authoritative EPT source footprints.
 # This avoids the National Map LPC index for known EPT coverage.
 suppressPackageStartupMessages(library(sf))
+suppressMessages(sf_use_s2(FALSE))
 usage <- paste(
   "Usage: Rscript scripts/make_ept_source_job_manifest.R --blocks BLOCKS.gpkg --layer NAME",
   "--ept-sources SOURCES.gpkg --ept-layer NAME --profiles SOURCE_PROFILES.csv",

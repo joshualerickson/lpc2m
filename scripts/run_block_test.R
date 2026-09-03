@@ -4,6 +4,7 @@
 # native mosaic -> bilinear delivery projection. Normalized halo blocks are
 # retained by default so metrics can be rerun without re-streaming EPT data.
 suppressPackageStartupMessages({ library(sf); library(terra); library(parallel) })
+suppressMessages(sf_use_s2(FALSE))
 
 usage <- paste(
   "Usage: Rscript scripts/run_block_test.R --blocks JOBS.gpkg --layer NAME",

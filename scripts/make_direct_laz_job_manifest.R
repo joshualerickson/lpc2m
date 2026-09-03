@@ -4,6 +4,7 @@
 # grouped by acquisition/work unit and retain every local tile needed by the
 # buffered extraction window.
 suppressPackageStartupMessages(library(sf))
+suppressMessages(sf_use_s2(FALSE))
 
 usage <- paste(
   "Usage: Rscript scripts/make_direct_laz_job_manifest.R --blocks BLOCKS.gpkg --layer NAME",
