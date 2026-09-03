@@ -64,7 +64,19 @@ if (isTRUE(settings$graph$drop_overlap)) {
 }
 if (isTRUE(settings$graph$first_returns_only)) las_graph <- filter_poi(las_graph, ReturnNumber == 1L)
 
-clip_core <- function(x) mask(crop(x, vect(core)), vect(core))
+clip_core <- function(x) {
+  core_vector <- vect(core)
+  raster_extent <- ext(x)
+  core_extent <- ext(core_vector)
+  overlaps <- raster_extent$xmin < core_extent$xmax && raster_extent$xmax > core_extent$xmin &&
+    raster_extent$ymin < core_extent$ymax && raster_extent$ymax > core_extent$ymin
+  if (overlaps) return(mask(crop(x, core_vector), core_vector))
+  # Source-specific EPT pieces can be narrower than one metric cell at a
+  # survey boundary.  Preserve the expected metric footprint as NA rather
+  # than failing the entire AOI because no cell center overlaps that sliver.
+  empty <- rast(ext = core_extent, resolution = res(x), crs = crs(x))
+  mask(empty, core_vector)
+}
 dir.create(opts[["output-dir"]], recursive = TRUE, showWarnings = FALSE)
 prefix <- opt_or("name", tools::file_path_sans_ext(basename(opts[["input"]])))
 
