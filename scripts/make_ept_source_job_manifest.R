@@ -37,6 +37,11 @@ if (!all(c("ept_name", "quality_level") %in% names(profiles))) stop("Profiles mu
 profiles$quality_level <- toupper(gsub("[^A-Za-z0-9]", "", profiles$quality_level))
 if (any(!profiles$quality_level %in% c("QL1", "QL2"))) stop("Every profile used must specify QL1 or QL2.", call. = FALSE)
 profiles$ept_url <- NULL
+# Live EPT source GPKGs already include these fields. Remove them before the
+# merge so the provenance profile is authoritative rather than being suffixed
+# to quality_level.x/quality_level.y and silently filtered out below.
+source_profile_columns <- intersect(c("quality_level", "acquisition_start", "acquisition_end"), names(sources))
+if (length(source_profile_columns)) sources <- sources[, setdiff(names(sources), source_profile_columns)]
 sources <- merge(sources, profiles, by = "ept_name", all.x = TRUE, sort = FALSE)
 sources <- sources[!is.na(sources$quality_level), ]
 if (!nrow(sources)) stop("No EPT sources have a QL1/QL2 profile.", call. = FALSE)
