@@ -94,7 +94,13 @@ run_metrics <- function(aoi, output_dir, delivery_template,
   if (isTRUE(dry_run)) return(invisible(provenance))
   selected <- provenance$candidates[provenance$candidates$selected, ]
   if (!nrow(selected)) stop("No EPT or direct-LAZ source is processable; inspect provenance$candidates.", call. = FALSE)
-  processing_aoi <- sf::st_as_sf(sf::st_union(sf::st_geometry(selected)))
+  # Provenance deliberately restores the caller's s2 setting.  The selected
+  # source pieces can still share exact tile edges, so dissolve them through
+  # GEOS before handing the AOI to the script engine.
+  use_s2 <- sf::sf_use_s2()
+  on.exit(sf::sf_use_s2(use_s2), add = TRUE)
+  sf::sf_use_s2(FALSE)
+  processing_aoi <- validate_aoi(sf::st_as_sf(sf::st_union(sf::st_geometry(selected))))
   profiles_path <- provenance$paths$profiles
   has_ept <- any(selected$source_type == "ept")
   has_direct <- identical(provenance$direct_laz_status, "planned") && any(selected$source_type == "direct_laz")
