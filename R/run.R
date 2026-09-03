@@ -21,8 +21,13 @@ run_lidar_metrics <- function(aoi, name, delivery_template, normalized_dir, metr
                               options = lidar_options(), project_dir = getwd(),
                               ept_sources = NULL, ept_source_layer = NULL, ept_profiles = NULL,
                               direct_laz_plan = NULL, direct_laz_tiles = NULL, direct_laz_cache = NULL,
-                              pdal_bin = Sys.getenv("PDAL_BIN", unset = Sys.which("pdal"))) {
-  aoi <- validate_aoi(aoi)
+                              pdal_bin = Sys.getenv("PDAL_BIN", unset = Sys.which("pdal")),
+                              .validated = FALSE) {
+  if (!isTRUE(.validated)) {
+    aoi <- validate_aoi(aoi)
+  } else if (!inherits(aoi, "sf") || !nrow(aoi) || is.na(sf::st_crs(aoi))) {
+    stop("Validated AOI must be a non-empty sf object with a CRS.", call. = FALSE)
+  }
   if (!is.list(options) || !all(c("block_m", "buffer_m", "families", "stream_workers", "normalize_workers", "metric_workers", "write_normalized", "resume") %in% names(options))) stop("options must come from lidar_options().", call. = FALSE)
   runner <- file.path(project_dir, "scripts", "run_aoi_production.R")
   if (!file.exists(runner)) stop("project_dir must contain scripts/run_aoi_production.R.", call. = FALSE)
@@ -114,7 +119,7 @@ run_metrics <- function(aoi, output_dir, delivery_template,
     direct_laz_plan = if (has_direct) provenance$paths$direct_laz_plan else NULL,
     direct_laz_tiles = if (has_direct) provenance$paths$direct_laz_tiles else NULL,
     direct_laz_cache = if (has_direct) direct_laz_cache else NULL,
-    pdal_bin = pdal_bin
+    pdal_bin = pdal_bin, .validated = TRUE
   )
   if (has_direct && file.exists(provenance$paths$direct_laz_plan)) {
     acquired <- utils::read.csv(provenance$paths$direct_laz_plan, stringsAsFactors = FALSE, na.strings = c("", "NA"))
