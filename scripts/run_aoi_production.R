@@ -11,7 +11,7 @@ usage <- paste(
   "[--buffer-m 60] [--families standard,canopy,graph] [--filter-field FIELD --filter-value VALUE]",
   "[--ept-sources FILE --ept-source-layer NAME --ept-profiles FILE]",
   "[--direct-laz-plan PLAN.csv --direct-laz-tiles TILES.gpkg --direct-laz-cache-dir DIR]",
-  "[--download-workers 8] [--write-normalized true|false] [--resume true|false] [--preflight-only true|false] [--pdal-bin PATH]",
+  "[--download-workers 8] [--overlap-ept-download true|false] [--write-normalized true|false] [--resume true|false] [--preflight-only true|false] [--pdal-bin PATH]",
   sep = "\n"
 )
 args <- commandArgs(trailingOnly = TRUE)
@@ -52,6 +52,29 @@ run_r <- function(script, script_args, env = character()) {
   if (status != 0L) stop("Failed: ", script, call. = FALSE)
 }
 
+# Direct delivery-tile download is network-bound.  Keep it in a background
+# process while EPT-only jobs use the otherwise idle stream/CPU/RAM workers.
+launch_download <- function(script_args) {
+  status_path <- file.path(provenance_dir, paste0(name, "_direct_laz_download.exit"))
+  log_path <- file.path(provenance_dir, paste0(name, "_direct_laz_download.log"))
+  unlink(c(status_path, log_path))
+  command <- paste(c("Rscript", shQuote("scripts/download_direct_laz.R"), shQuote(script_args)), collapse = " ")
+  command <- paste0(command, " > ", shQuote(log_path), " 2>&1; echo $? > ", shQuote(status_path))
+  system2("/bin/sh", c("-c", shQuote(command)), wait = FALSE)
+  message("Downloading direct LAZ in background while EPT jobs run: ", log_path)
+  list(status = status_path, log = log_path)
+}
+
+wait_download <- function(job) {
+  while (!file.exists(job$status)) Sys.sleep(1)
+  status <- suppressWarnings(as.integer(readLines(job$status, n = 1L)))
+  if (is.na(status) || status != 0L) {
+    if (file.exists(job$log)) cat(readLines(job$log), sep = "\n")
+    stop("Background direct-LAZ download failed; see ", job$log, call. = FALSE)
+  }
+  if (file.exists(job$log)) cat(readLines(job$log), sep = "\n")
+}
+
 if (file.exists(blocks_path)) {
   if (!resume) stop("Processing grid already exists; use --resume true or choose a new --name: ", blocks_path, call. = FALSE)
   message("Reusing processing grid: ", blocks_path)
@@ -64,13 +87,51 @@ if (file.exists(blocks_path)) {
   ))
 }
 
-# Tile acquisition is independent of the block manifest. Re-run it during a
-# resumed job so missing/previously interrupted source tiles are repaired.
-if (direct_laz && !preflight_only) {
-  run_r("scripts/download_direct_laz.R", c(
+pdal_bin <- opt_or("pdal-bin", Sys.getenv("PDAL_BIN", unset = Sys.which("pdal")))
+run_blocks <- function(blocks, resume_value = opt_or("resume", "false")) {
+  if (!nzchar(pdal_bin) || !file.exists(pdal_bin)) stop("PDAL is required; set PDAL_BIN or add it to PATH.", call. = FALSE)
+  runner_args <- c(
+    "--blocks", blocks, "--layer", jobs_layer,
+    "--delivery-template", opts[["delivery-template"]], "--name", name,
+    "--stream-workers", opt_or("stream-workers", "8"),
+    "--normalize-workers", opt_or("normalize-workers", "48"),
+    "--metric-workers", opt_or("metric-workers", "64"),
+    "--buffer-m", opt_or("buffer-m", "60"), "--families", opt_or("families", "standard,canopy,graph"),
+    "--write-normalized", opt_or("write-normalized", "true"),
+    "--normalized-dir", opts[["normalized-dir"]], "--metrics-dir", metrics_dir,
+    "--resume", resume_value
+  )
+  run_r("scripts/run_block_test.R", runner_args, env = paste0("PDAL_BIN=", pdal_bin))
+}
+
+ept_jobs_path <- file.path(provenance_dir, paste0(name, "_ept_jobs.gpkg"))
+ept_preprocessed <- FALSE
+download_job <- NULL
+overlap_ept_download <- is_true(opt_or("overlap-ept-download", "true"))
+if (!preflight_only && overlap_ept_download && direct_ept && direct_laz && !file.exists(jobs_path)) {
+  if (!file.exists(ept_jobs_path)) {
+    run_r("scripts/make_ept_source_job_manifest.R", c(
+      "--blocks", blocks_path, "--layer", blocks_layer,
+      "--ept-sources", opts[["ept-sources"]], "--ept-layer", opts[["ept-source-layer"]], "--profiles", opts[["ept-profiles"]],
+      "--output", ept_jobs_path, "--output-layer", jobs_layer
+    ))
+  }
+  download_job <- launch_download(c(
     "--plan", opts[["direct-laz-plan"]], "--output-dir", opts[["direct-laz-cache-dir"]],
     "--workers", opt_or("download-workers", opt_or("stream-workers", "8")), "--resume", opt_or("resume", "false")
   ))
+  message("Starting EPT-only processing while direct LAZ downloads.")
+  run_blocks(ept_jobs_path)
+  ept_preprocessed <- TRUE
+}
+
+# Tile acquisition is independent of the block manifest. Re-run it during a
+# resumed job so missing/previously interrupted source tiles are repaired.
+if (direct_laz && !preflight_only) {
+  if (!is.null(download_job)) wait_download(download_job) else run_r("scripts/download_direct_laz.R", c(
+      "--plan", opts[["direct-laz-plan"]], "--output-dir", opts[["direct-laz-cache-dir"]],
+      "--workers", opt_or("download-workers", opt_or("stream-workers", "8")), "--resume", opt_or("resume", "false")
+    ))
 }
 available_direct_laz <- FALSE
 if (direct_laz && !preflight_only) {
@@ -95,7 +156,6 @@ if (file.exists(jobs_path)) {
 } else {
   component_paths <- character()
   if (direct_ept) {
-    ept_jobs_path <- file.path(provenance_dir, paste0(name, "_ept_jobs.gpkg"))
     if (!file.exists(ept_jobs_path)) {
       run_r("scripts/make_ept_source_job_manifest.R", c(
         "--blocks", blocks_path, "--layer", blocks_layer,
@@ -136,18 +196,7 @@ if (preflight_only) {
   quit(status = 0L)
 }
 
-runner_args <- c(
-  "--blocks", jobs_path, "--layer", jobs_layer,
-  "--delivery-template", opts[["delivery-template"]], "--name", name,
-  "--stream-workers", opt_or("stream-workers", "8"),
-  "--normalize-workers", opt_or("normalize-workers", "48"),
-  "--metric-workers", opt_or("metric-workers", "64"),
-  "--buffer-m", opt_or("buffer-m", "60"), "--families", opt_or("families", "standard,canopy,graph"),
-  "--write-normalized", opt_or("write-normalized", "true"),
-  "--normalized-dir", opts[["normalized-dir"]], "--metrics-dir", metrics_dir,
-  "--resume", opt_or("resume", "false")
-)
-pdal_bin <- opt_or("pdal-bin", Sys.getenv("PDAL_BIN", unset = Sys.which("pdal")))
-if (!nzchar(pdal_bin) || !file.exists(pdal_bin)) stop("PDAL is required; set PDAL_BIN or add it to PATH.", call. = FALSE)
-run_r("scripts/run_block_test.R", runner_args, env = paste0("PDAL_BIN=", pdal_bin))
+# The final mixed pass sees EPT metrics as cached and processes only newly
+# available direct jobs, then mosaics both source types into one delivery grid.
+run_blocks(jobs_path, if (ept_preprocessed) "true" else opt_or("resume", "false"))
 message("Production AOI run completed: ", name)
