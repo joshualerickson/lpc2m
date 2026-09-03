@@ -249,7 +249,12 @@ if (any(!complete)) {
 # and extent. Metrics remain in native LAS CRS until this final bilinear step.
 template_ref <- rast(opts[["delivery-template"]])
 delivery_core <- st_transform(st_union(completed_blocks), crs(template_ref))
-template <- crop(template_ref[[1]], ext(vect(delivery_core)))
+# A historical delivery raster defines CRS, resolution, and grid alignment,
+# not the spatial limit of a new AOI.  Build an aligned delivery grid over the
+# completed AOI so a valid Oregon/Idaho/etc. run is not rejected merely because
+# the reference raster's existing extent is elsewhere.
+delivery_extent <- align(ext(vect(delivery_core)), template_ref[[1]], snap = "out")
+template <- rast(delivery_extent, resolution = res(template_ref[[1]]), crs = crs(template_ref[[1]]))
 mosaic_rows <- lapply(families_vec, function(family) {
   suffix <- family_suffix[[family]]
   files <- file.path(metric_dir, paste0(completed_blocks$block_id, "_metrics_", suffix, ".tif"))

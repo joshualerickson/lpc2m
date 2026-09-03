@@ -82,6 +82,9 @@ run_metrics <- function(aoi, output_dir, delivery_template,
                         local_laz_index = NULL, local_laz_layer = NULL,
                         direct_laz_cache = file.path(output_dir, "source_laz"),
                         header_workers = 16L, refresh_sources = FALSE) {
+  if (!is.list(options) || !all(c("block_m", "buffer_m", "families", "stream_workers", "normalize_workers", "metric_workers", "write_normalized", "resume") %in% names(options))) {
+    stop("options must be a lidar_options() list. Use e.g. lidar_opts <- lidar_options(...), then supply options = lidar_opts.", call. = FALSE)
+  }
   aoi <- validate_aoi(aoi)
   provenance <- run_provenance(
     aoi = aoi, output_dir = output_dir, name = name, project_dir = project_dir,

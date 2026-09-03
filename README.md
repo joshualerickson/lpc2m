@@ -25,7 +25,7 @@ devtools::load_all(".")
 
 aoi <- sf::st_read("data/district.gpkg", layer = "district")
 
-options <- lidar_options(
+lidar_opts <- lidar_options(
   block_m = 500, buffer_m = 60,
   families = c("standard", "canopy", "graph"),
   download_workers = 8, stream_workers = 16,
@@ -38,7 +38,7 @@ result <- run_metrics(
   output_dir = "/lidar/metrics/district",
   delivery_template = "/path/to/delivery_grid.tif",
   normalized_dir = "/lidar/normalized/district",
-  options = options,
+  options = lidar_opts,
   project_dir = getwd(),
   pdal_bin = Sys.getenv("PDAL_BIN")
 )
