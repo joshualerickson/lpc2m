@@ -83,8 +83,6 @@ run_metrics <- function(aoi, output_dir, delivery_template,
                         direct_laz_cache = file.path(output_dir, "source_laz"),
                         header_workers = 16L, refresh_sources = FALSE) {
   aoi <- validate_aoi(aoi)
-  source_path <- file.path(project_dir, "data", "lidar_need_ept.gpkg")
-  if (!file.exists(source_path)) stop("Authoritative EPT source cache is missing: ", source_path, call. = FALSE)
   provenance <- run_provenance(
     aoi = aoi, output_dir = output_dir, name = name, project_dir = project_dir,
     include_direct_laz = TRUE, local_laz_index = local_laz_index,
@@ -109,7 +107,7 @@ run_metrics <- function(aoi, output_dir, delivery_template,
     aoi = processing_aoi, name = name, delivery_template = delivery_template,
     normalized_dir = normalized_dir, metrics_dir = output_dir,
     options = options, project_dir = project_dir,
-    ept_sources = if (has_ept) source_path else NULL,
+    ept_sources = if (has_ept) provenance$paths$ept_sources else NULL,
     ept_source_layer = if (has_ept) "ept_sources" else NULL,
     ept_profiles = if (has_ept) profiles_path else NULL,
     direct_laz_plan = if (has_direct) provenance$paths$direct_laz_plan else NULL,

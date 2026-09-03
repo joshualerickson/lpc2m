@@ -64,3 +64,15 @@
   }
   list(status = "planned", holes = holes_path, plan = plan_path, tiles = tiles_path)
 }
+
+.resolve_live_ept_sources <- function(aoi, provenance_dir, name, project_dir) {
+  aoi_path <- file.path(provenance_dir, paste0(name, "_live_ept_aoi.gpkg"))
+  sources_path <- file.path(provenance_dir, paste0(name, "_live_ept_sources.gpkg"))
+  .write_sf_replace(aoi, aoi_path, "aoi")
+  if (file.exists(sources_path)) unlink(sources_path)
+  script <- file.path(project_dir, "scripts", "resolve_live_ept_sources.R")
+  if (!file.exists(script)) stop("project_dir must contain scripts/resolve_live_ept_sources.R.", call. = FALSE)
+  status <- system2("Rscript", shQuote(c(script, "--aoi", aoi_path, "--layer", "aoi", "--output", sources_path)))
+  if (status == 0L && file.exists(sources_path)) return(list(status = "resolved", path = sources_path))
+  list(status = "unavailable", path = NULL)
+}

@@ -12,7 +12,9 @@ resumable source cache and shared by all intersecting processing blocks.
 ### Interactive R interface
 
 Pass an `sf` polygon or multipolygon and receive metric products plus
-provenance. Source resolution is automatic and may use EPT for one part of an
+provenance. Source resolution is automatic: every run discovers EPT coverage
+from the current USGS EPT catalog, confirms the exact STAC item/end point, and
+attaches current USGS QL and acquisition-date metadata. It may use EPT for one part of an
 AOI, direct USGS delivery LAZ for another part, and explicitly report a third
 part with no published LiDAR. The same normalization and metric code is used
 after either acquisition path.

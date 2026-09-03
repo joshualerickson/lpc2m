@@ -49,21 +49,34 @@ run_provenance <- function(aoi, output_dir = NULL, name = "lidar_provenance",
   if (!is.null(event_year_col) && !event_year_col %in% names(aoi)) stop("AOI has no event_year_col: ", event_year_col, call. = FALSE)
   if (!is.null(event_date_col) && !event_date_col %in% names(aoi)) stop("AOI has no event_date_col: ", event_date_col, call. = FALSE)
 
-  source_path <- file.path(project_dir, "data", "lidar_need_ept.gpkg")
-  if (!file.exists(source_path)) stop("Authoritative EPT source cache is missing: ", source_path, call. = FALSE)
+  provenance_dir <- if (is.null(output_dir)) tempfile(paste0(name, "_provenance_")) else file.path(output_dir, "provenance")
+  dir.create(provenance_dir, recursive = TRUE, showWarnings = FALSE)
+  # Live EPT discovery is the default. The repository footprint is retained
+  # only as an offline fallback, never as the primary source of truth.
+  live_ept <- .resolve_live_ept_sources(aoi, provenance_dir, name, project_dir)
+  source_path <- live_ept$path
+  if (is.null(source_path)) source_path <- file.path(project_dir, "data", "lidar_need_ept.gpkg")
+  if (!file.exists(source_path)) stop("Live EPT discovery failed and no fallback EPT cache exists.", call. = FALSE)
   sources <- sf::st_read(source_path, layer = "ept_sources", quiet = TRUE)
   sources <- validate_aoi(sf::st_transform(sources, sf::st_crs(aoi)))
-  sources <- sources[lengths(sf::st_intersects(sources, aoi)) > 0, c("ept_name", "ept_url")]
+  # Retain live resolver metadata (QL and acquisition dates) alongside the
+  # endpoint. The older static cache has only ept_name/ept_url and is enriched
+  # below when those columns are absent.
+  sources <- sources[lengths(sf::st_intersects(sources, aoi)) > 0, ]
 
-  metadata <- .read_source_metadata(project_dir)
-  source_meta <- data.frame(
-    ept_name = sources$ept_name,
-    quality_level = metadata$quality_level[match(sources$ept_name, metadata$workunit)],
-    acquisition_start = .epoch_date(metadata$collect_start[match(sources$ept_name, metadata$workunit)]),
-    acquisition_end = .epoch_date(metadata$collect_end[match(sources$ept_name, metadata$workunit)]),
-    stringsAsFactors = FALSE
-  )
-  sources <- merge(sources, source_meta, by = "ept_name", all.x = TRUE, sort = FALSE)
+  if (!all(c("quality_level", "acquisition_start", "acquisition_end") %in% names(sources))) {
+    metadata <- .read_source_metadata(project_dir)
+    source_meta <- data.frame(
+      ept_name = sources$ept_name,
+      quality_level = metadata$quality_level[match(sources$ept_name, metadata$workunit)],
+      acquisition_start = .epoch_date(metadata$collect_start[match(sources$ept_name, metadata$workunit)]),
+      acquisition_end = .epoch_date(metadata$collect_end[match(sources$ept_name, metadata$workunit)]),
+      stringsAsFactors = FALSE
+    )
+    sources <- merge(sources, source_meta, by = "ept_name", all.x = TRUE, sort = FALSE)
+  }
+  sources$acquisition_start <- as.Date(sources$acquisition_start)
+  sources$acquisition_end <- as.Date(sources$acquisition_end)
   candidates <- suppressWarnings(sf::st_intersection(aoi, sources))
   candidates <- candidates[as.numeric(sf::st_area(candidates)) > 0, ]
   candidates$source_type <- rep("ept", nrow(candidates))
@@ -81,8 +94,6 @@ run_provenance <- function(aoi, output_dir = NULL, name = "lidar_provenance",
   candidates$coverage_status[temporal & !is.na(candidates$acquisition_end) & candidates$acquisition_end >= event_date] <- "not_pre_event"
   candidates$selected <- candidates$coverage_status == "ready_ept"
 
-  provenance_dir <- if (is.null(output_dir)) tempfile(paste0(name, "_provenance_")) else file.path(output_dir, "provenance")
-  dir.create(provenance_dir, recursive = TRUE, showWarnings = FALSE)
   aoi_union <- sf::st_union(aoi)
   ept_ready <- candidates[candidates$selected, ]
   ept_geometry <- if (nrow(ept_ready)) sf::st_union(sf::st_geometry(ept_ready)) else sf::st_sfc(crs = sf::st_crs(aoi))
@@ -187,7 +198,7 @@ run_provenance <- function(aoi, output_dir = NULL, name = "lidar_provenance",
     )) else .empty_source_inventory()
   source_inventory <- rbind(ept_inventory, direct_inventory)
 
-  paths <- list(direct_laz_holes = direct$holes, direct_laz_plan = direct$plan, direct_laz_tiles = direct$tiles)
+  paths <- list(ept_sources = source_path, direct_laz_holes = direct$holes, direct_laz_plan = direct$plan, direct_laz_tiles = direct$tiles)
   if (!is.null(output_dir)) {
     paths$coverage <- file.path(provenance_dir, paste0(name, "_coverage_candidates.gpkg"))
     paths$summary <- file.path(provenance_dir, paste0(name, "_feature_summary.csv"))
