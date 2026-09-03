@@ -1,0 +1,20 @@
+# User-provided AOIs, cached metadata, and generated spatial products are not source.
+data/*
+
+# Re-creatable point-cloud staging and final metric products.
+cache/
+outputs/
+work/
+
+# Local R/build state.
+.Rhistory
+.Rproj.user/
+*.tar.gz
+
+# Credentials and machine-local configuration.
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key

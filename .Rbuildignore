@@ -1,0 +1,11 @@
+^data($|/)
+^cache($|/)
+^work($|/)
+^scripts($|/)
+^lidar\.metrics($|/)
+^\.git$
+^\.agents$
+^\.codex$
+^context\.md$
+^agent\.md$
+^README\.md$

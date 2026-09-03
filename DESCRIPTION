@@ -1,0 +1,13 @@
+Package: usgslpc
+Title: AOI Driven USGS LiDAR Metrics
+Version: 0.0.1
+Authors@R: person("Josh", "Erickson", role = c("aut", "cre"))
+Description: Resolve USGS LiDAR sources for polygonal areas of interest,
+    normalize point clouds, calculate lidar.metrics products, and retain
+    reproducible provenance.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Imports:
+    sf,
+    utils
