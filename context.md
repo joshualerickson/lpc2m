@@ -36,11 +36,12 @@ are optional function arguments, not required workflow knowledge.
 
 `run_metrics(aoi)` is successful when it produces metrics for every source
 area that can be resolved and processed. It must not fail the complete AOI
-because another piece lacks EPT, has no published QL metadata, or needs a
-direct LAZ acquisition. Instead it returns and writes a `coverage_report`
-with each area classified as `processed`, `needs_direct_laz`,
-`needs_metadata`, or `failed`. It fails only when no processable area remains
-or an explicitly requested strict mode is enabled.
+because another piece lacks EPT, has no published QL metadata, needs direct
+LAZ acquisition, or has no published source. Instead it returns and writes a
+coverage report with explicit statuses such as `ready_ept`,
+`ready_direct_laz_local`, `ready_direct_laz_download`, `needs_metadata`,
+`no_published_lidar`, or `failed`. It fails only when no processable area
+remains or an explicitly requested strict mode is enabled.
 
 ## Processing invariants
 
@@ -50,6 +51,8 @@ or an explicitly requested strict mode is enabled.
   only after native mosaicking, using documented delivery resampling.
 - Raw streamed extracts are disposable. Normalized halo blocks and final
   metrics are resumable products.
+- Direct delivery LAZ is downloaded once to a source cache and reused by every
+  intersecting processing block. EPT extracts remain transient per block.
 - Each stage is independently concurrent and bounded: network streams, point
   normalization, and metrics must not compete as one worker pool.
 - A source/QL ambiguity is a preflight failure, not a default guess.

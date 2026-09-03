@@ -3,36 +3,39 @@
 This repository orchestrates AOI-driven USGS 3DEP point-cloud processing.
 By default it retains normalized LAZ processing blocks (including their halos),
 metric rasters, and provenance. Raw EPT extracts are transient and deleted once
-their normalized block and metrics have completed successfully.
+their normalized block and metrics have completed successfully. When EPT is
+not available, required USGS delivery LAZ tiles are downloaded once into a
+resumable source cache and shared by all intersecting processing blocks.
 
 ## How to use
 
 ### Interactive R interface
 
-The long-term public interface is an R package: pass an `sf` polygon or
-multipolygon and receive metric products plus provenance. The current package
-functions delegate the heavy execution stages to the validated script engine,
-so interactive and command-line runs use the same settings and outputs.
+Pass an `sf` polygon or multipolygon and receive metric products plus
+provenance. Source resolution is automatic and may use EPT for one part of an
+AOI, direct USGS delivery LAZ for another part, and explicitly report a third
+part with no published LiDAR. The same normalization and metric code is used
+after either acquisition path.
 
 ```r
 # From this repository during development.
 devtools::load_all(".")
 
-aoi <- sf::st_read("data/lidar_need_ept_by_forest.gpkg", layer = "ept_by_forest")
-aoi <- aoi[aoi$forestname == "Idaho Panhandle National Forests", ]
+aoi <- sf::st_read("data/district.gpkg", layer = "district")
 
 options <- lidar_options(
   block_m = 500, buffer_m = 60,
   families = c("standard", "canopy", "graph"),
-  stream_workers = 16, normalize_workers = 40, metric_workers = 64,
+  download_workers = 8, stream_workers = 16,
+  normalize_workers = 40, metric_workers = 64,
   write_normalized = TRUE, resume = TRUE
 )
 
-run_metrics(
-  aoi = aoi, name = "idaho_panhandle_ept",
-  output_dir = "/lidar/metrics/idaho_panhandle_ept",
+result <- run_metrics(
+  aoi = aoi, name = "district",
+  output_dir = "/lidar/metrics/district",
   delivery_template = "/path/to/delivery_grid.tif",
-  normalized_dir = "/lidar/normalized/idaho_panhandle_ept",
+  normalized_dir = "/lidar/normalized/district",
   options = options,
   project_dir = getwd(),
   pdal_bin = Sys.getenv("PDAL_BIN")
@@ -40,8 +43,35 @@ run_metrics(
 ```
 
 Use `dry_run = TRUE` to resolve sources and write the coverage report without
-starting LiDAR processing. Missing EPT coverage or unresolved source metadata
-is reported and does not cancel processable portions of the AOI.
+downloading point clouds or starting processing. This produces an exact source
+inventory CSV with source type, URL, local path when already available, QL,
+acquisition dates/year, estimated bytes, and availability. Missing coverage or
+unresolved metadata does not cancel processable portions of the AOI.
+
+```r
+plan <- run_metrics(
+  aoi, output_dir = "/lidar/metrics/district", name = "district",
+  delivery_template = "/path/to/delivery_grid.tif",
+  dry_run = TRUE
+)
+
+plan$source_inventory
+plan$candidates[, c("source_type", "coverage_status", "quality_level")]
+plan$paths
+```
+
+If some delivery LAZ files already exist locally, create a PDAL tile index once
+and pass it as an optional credit against the download plan. Nothing else about
+the high-level workflow changes.
+
+```r
+result <- run_metrics(
+  aoi, output_dir = "/lidar/metrics/district", name = "district",
+  delivery_template = "/path/to/delivery_grid.tif",
+  local_laz_index = "data/local_sources/existing_tiles.shp",
+  local_laz_layer = "existing_tiles"
+)
+```
 
 Optional diagnostic only: `preflight_ept_sources(aoi, ept_sources)` returns
 the exact EPT survey pieces and URLs that intersect an AOI. It is useful for
@@ -50,7 +80,8 @@ mapping or source review, but ordinary users should not need to call it before
 
 ### Provenance and event-date filtering
 
-Use `run_provenance()` when source timing is part of the analysis contract.
+Use `run_provenance()` when source timing is part of the analysis contract or
+when only the EPT/direct-LAZ/missing acquisition plan is needed.
 For example, this keeps fire polygons only when eligible EPT LiDAR was acquired
 before the burn year. Acquisition during the burn year is conservatively
 excluded because the exact fire date may be unknown.
@@ -75,6 +106,10 @@ provenance$summary
 
 # Every intersecting source and why it was or was not eligible.
 provenance$candidates
+
+# One row per EPT resource or direct-LAZ tile, including URL, QL, date/year,
+# estimated bytes, local path, and whether a download is required.
+provenance$source_inventory
 
 # IDs ready for downstream metrics or modeling.
 eligible_ids <- provenance$summary$aoi_id[provenance$summary$meets_contract]
@@ -184,12 +219,11 @@ provenance <- run_provenance(
    source if it is selected for metrics. The `*_summary.csv` reports unioned
    coverage area, avoiding double counting where EPT resource footprints overlap.
 
-   ### Plan non-EPT gaps before downloading
+   ### Optional: index existing delivery LAZ
 
-   Keep the EPT and non-EPT paths separate.  First make the authoritative
-   footprint above; the `*_not_ept.gpkg` output is the only input to direct-LAZ
-   planning.  If a project already has downloaded LAZ files, index those files
-   once with PDAL and account for them before requesting anything else:
+   The package handles mixed EPT and non-EPT AOIs automatically. If a project
+   already has downloaded LAZ files, index them once so `run_metrics()` can
+   reuse them instead of planning the same downloads:
 
    ```bash
    # Run once for a local directory of LAZ files.  The index records each
@@ -198,32 +232,12 @@ provenance <- run_provenance(
      --tindex data/local_sources/northcentral_tiles.shp \
      --filespec '/path/to/ID_NorthCentral_D22/*.laz' \
      --write_absolute_path
-
-   # Intersect the local source index with the non-EPT footprint.  This writes
-   # the specific local files needed, their sizes, and a coverage summary.
-   Rscript scripts/account_local_laz_coverage.R \
-     --holes data/lidar_need_not_ept.gpkg --holes-layer not_ept \
-     --tile-index data/local_sources/northcentral_tiles.shp --tile-layer northcentral_tiles \
-     --output data/lidar_need_local_laz_accounting.gpkg
    ```
 
-   The output layer `local_tile_overlap` is an auditable list of local LAZ
-   files already available for a gap. Its companion `*_summary.csv` reports
-   the available bytes and area. Run the metadata resolver on each remaining,
-   dissolved gap to obtain the candidate USGS work units and their delivery
-   (`lpc_link`) and metadata URLs:
-
-   ```bash
-   Rscript scripts/resolve_usgs_lpc.R \
-     --aoi data/one_remaining_gap.gpkg --layer gap \
-     --output data/one_remaining_gap_usgs_candidates.csv
-   ```
-
-   These candidates are deliberately a planning list, not a download command:
-   the resolver uses a bounding-box query, so the next direct-LAZ planner must
-   spatially select the delivery tiles that actually intersect each gap and
-   sum their published file sizes. No AWS credentials or Requester-Pays access
-   are used by this workflow.
+   Then supply `local_laz_index` and `local_laz_layer` to `run_metrics()` or
+   `run_provenance()`. The provenance inventory distinguishes `local`,
+   `download_required`, `downloaded`, `failed`, and EPT `stream` sources. No
+   AWS credentials or Requester-Pays access are used by this path.
 
    ### Run confirmed EPT coverage without the National Map index
 
@@ -253,11 +267,11 @@ provenance <- run_provenance(
      --resume true
    ```
 
-6. Run an AOI polygon or multipolygon. The production script creates the grid,
-   resolves USGS source-specific jobs, and runs the pipeline. It determines the
-   EPT URL and QL for every block; do not hand-enter a single source for a
-   district. Start conservatively with the independent queues below; increase
-   only after observing RAM, disk, and USGS request behavior on a small AOI.
+6. The interactive `run_metrics()` call above is the recommended mixed-source
+   workflow. The production script remains available as a lower-level adapter
+   for EPT-only or already-planned jobs. Start conservatively with the
+   independent queues below; increase only after observing RAM, disk, and USGS
+   request behavior on a small AOI.
 
    ```bash
    # Either activate the environment containing PDAL, or pass its path below.
@@ -273,13 +287,14 @@ provenance <- run_provenance(
 
    `--block-m 500` is the default and may be changed for testing. The generated
    grid and USGS job layer are retained under `METRICS_DIR/provenance`. The job
-   layer records `ept_url`, `quality_level`, work-unit, acquisition start/end
-   dates, acquisition completion year, and source area. It gives newest coverage
-   priority and splits only blocks that cross a source boundary. Streaming is capped separately from compute. A block moves to normalization
+   layer records `source_type`, source URL/files, `quality_level`, work unit,
+   acquisition start/end dates, acquisition completion year, and source area.
+   It gives newest coverage priority and splits only blocks that cross a source
+   boundary. Streaming is capped separately from compute. A block moves to normalization
    as soon as its EPT stream completes, then to metrics as soon as normalization
    completes; the workflow does not wait for all district tiles at each stage.
-   Unsupported quality levels and work units without public EPT endpoints are
-   skipped and recorded as `*_uncovered.csv` or `*_no_ept.csv` in provenance.
+   Unsupported quality levels, failed downloads, and genuinely missing source
+   coverage remain explicit in provenance and do not erase completed areas.
    By default the production run writes standard, canopy/tree, and graph metric
    families. Limit or rerun families as needed with, for example,
    `--families graph` or `--families standard,canopy`. With retained normalized

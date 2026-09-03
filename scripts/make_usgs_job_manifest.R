@@ -5,7 +5,7 @@
 # removed, so a metric cell is never processed twice from competing surveys.
 suppressPackageStartupMessages({ library(sf); library(curl); library(jsonlite) })
 
-service <- "https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/8/query"
+service <- "https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/24/query"
 usage <- paste(
   "Usage: Rscript scripts/make_usgs_job_manifest.R --blocks BLOCKS.gpkg --layer NAME",
   "--output JOBS.gpkg --output-layer NAME [--ept-base URL] [--validate-ept true|false]",

@@ -40,13 +40,21 @@ if (any(is.na(c(stream_workers, normalize_workers, metric_workers))) ||
 blocks <- st_read(opts[["blocks"]], layer = opts[["layer"]], quiet = TRUE)
 if (!"block_id" %in% names(blocks) || !nrow(blocks)) stop("blocks must include block_id values.", call. = FALSE)
 if (anyDuplicated(blocks$block_id)) stop("block_id values must be unique in the job layer.", call. = FALSE)
-has_job_sources <- all(c("ept_url", "quality_level") %in% names(blocks))
+has_job_sources <- "quality_level" %in% names(blocks) &&
+  (all(c("source_type", "ept_url", "source_files", "source_crs") %in% names(blocks)) || "ept_url" %in% names(blocks))
 has_global_source <- all(c("ept-url", "quality-level") %in% names(opts))
 if (!has_job_sources && !has_global_source) {
   stop("Jobs must contain ept_url and quality_level, or supply --ept-url and --quality-level for a single-source test.", call. = FALSE)
 }
-if (has_job_sources && any(!nzchar(blocks$ept_url) | is.na(blocks$quality_level))) {
-  stop("Every job must have ept_url and quality_level.", call. = FALSE)
+if (has_job_sources) {
+  if (!"source_type" %in% names(blocks)) blocks$source_type <- "ept"
+  blocks$source_type[is.na(blocks$source_type) | !nzchar(blocks$source_type)] <- "ept"
+  if (any(!blocks$source_type %in% c("ept", "direct_laz"))) stop("source_type must be ept or direct_laz.", call. = FALSE)
+  if (any(is.na(blocks$quality_level) | !toupper(blocks$quality_level) %in% c("QL1", "QL2"))) stop("Every job must have QL1 or QL2 quality_level.", call. = FALSE)
+  ept <- blocks$source_type == "ept"
+  direct <- blocks$source_type == "direct_laz"
+  if (any(ept & (is.na(blocks$ept_url) | !nzchar(blocks$ept_url)))) stop("Every EPT job must have ept_url.", call. = FALSE)
+  if (any(direct & (is.na(blocks$source_files) | !nzchar(blocks$source_files) | is.na(blocks$source_crs)))) stop("Every direct-LAZ job must have source_files and source_crs.", call. = FALSE)
 }
 name <- opts[["name"]]
 work_dir <- file.path("work", name)
@@ -104,9 +112,12 @@ block_paths <- function(id) {
 source_for_block <- function(id) {
   if (has_job_sources) {
     row <- blocks[match(id, blocks$block_id), ]
-    list(ept_url = as.character(row$ept_url), quality_level = toupper(as.character(row$quality_level)))
+    list(source_type = as.character(row$source_type), ept_url = as.character(row$ept_url),
+         source_files = as.character(row$source_files), source_crs = as.character(row$source_crs),
+         quality_level = toupper(as.character(row$quality_level)))
   } else {
-    list(ept_url = opts[["ept-url"]], quality_level = toupper(opts[["quality-level"]]))
+    list(source_type = "ept", ept_url = opts[["ept-url"]], source_files = NA_character_, source_crs = NA_character_,
+         quality_level = toupper(opts[["quality-level"]]))
   }
 }
 
@@ -121,10 +132,18 @@ run_block_stage <- function(id, stage) {
     report <- if (resume && (file.exists(paths$norm) || file.exists(paths$raw))) {
       cached_stage(id, stage)
     } else {
-      run_stage(id, stage, "scripts/extract_ept_block.R", c(
-        "--ept-url", source$ept_url, "--aoi", opts[["blocks"]], "--layer", opts[["layer"]],
-        "--block-id", id, "--output", paths$raw, "--buffer-m", as.character(buffer_m), "--requests", "16"
-      ))
+      if (identical(source$source_type, "direct_laz")) {
+        run_stage(id, stage, "scripts/extract_laz_block.R", c(
+          "--source-files", source$source_files, "--source-crs", source$source_crs,
+          "--aoi", opts[["blocks"]], "--layer", opts[["layer"]], "--block-id", id,
+          "--output", paths$raw, "--buffer-m", as.character(buffer_m)
+        ))
+      } else {
+        run_stage(id, stage, "scripts/extract_ept_block.R", c(
+          "--ept-url", source$ept_url, "--aoi", opts[["blocks"]], "--layer", opts[["layer"]],
+          "--block-id", id, "--output", paths$raw, "--buffer-m", as.character(buffer_m), "--requests", "16"
+        ))
+      }
     }
   } else if (identical(stage, "normalize")) {
     report <- if (resume && file.exists(paths$norm)) cached_stage(id, stage) else run_stage(id, stage, "scripts/normalize_laz_block.R", c(
@@ -244,7 +263,7 @@ mosaic_rows <- lapply(families_vec, function(family) {
 mosaics <- do.call(rbind, mosaic_rows)
 
 manifest <- data.frame(
-  name = name, source_mode = if (has_job_sources) "job_manifest" else "single_source_test",
+  name = name, source_mode = if (has_job_sources && any(blocks$source_type == "direct_laz")) "mixed_or_direct_job_manifest" else if (has_job_sources) "ept_job_manifest" else "single_source_test",
   stream_workers = worker_limits[["stream"]], normalize_workers = worker_limits[["normalize"]],
   metric_workers = worker_limits[["metrics"]], blocks = nrow(blocks), completed_blocks = nrow(completed_blocks),
   incomplete_blocks = sum(!complete), buffer_m = buffer_m,

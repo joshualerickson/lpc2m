@@ -5,10 +5,11 @@
 # bytes of a candidate LAZ, which contains its extent and total byte size.
 suppressPackageStartupMessages({ library(sf); library(curl); library(jsonlite) })
 
-service <- "https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/8/query"
+service <- "https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/24/query"
 usage <- paste(
   "Usage: Rscript scripts/plan_usgs_direct_laz.R --holes HOLES.gpkg --layer NAME --output PLAN.csv",
-  "[--local-index TILES.shp --local-layer NAME] [--header-workers 16] [--quality-levels QL1,QL2]",
+  "[--footprints-output TILES.gpkg] [--local-index TILES.shp --local-layer NAME]",
+  "[--header-workers 16] [--quality-levels QL1,QL2]",
   sep = "\n"
 )
 args <- commandArgs(trailingOnly = TRUE)
@@ -46,7 +47,7 @@ as_poly <- function(feature) {
   ring_list <- if (is.array(rings) && length(dim(rings)) == 3L) lapply(seq_len(dim(rings)[1]), function(i) matrix(rings[i, , ], ncol = 2L)) else if (is.matrix(rings)) list(rings) else rings
   st_multipolygon(lapply(ring_list, function(r) list(if (is.matrix(r)) r else matrix(unlist(r), ncol = 2L, byrow = TRUE))))
 }
-attrs <- lapply(features, function(f) data.frame(workunit = as.character(field(f$attributes, "workunit")), project = as.character(field(f$attributes, "project")), ql = as.character(field(f$attributes, "ql")), collect_end = as.numeric(field(f$attributes, "collect_end")), lpc_link = as.character(field(f$attributes, "lpc_link")), horiz_crs = as.character(field(f$attributes, "horiz_crs")), stringsAsFactors = FALSE))
+attrs <- lapply(features, function(f) data.frame(workunit = as.character(field(f$attributes, "workunit")), project = as.character(field(f$attributes, "project")), ql = as.character(field(f$attributes, "ql")), collect_start = as.numeric(field(f$attributes, "collect_start")), collect_end = as.numeric(field(f$attributes, "collect_end")), lpc_link = as.character(field(f$attributes, "lpc_link")), horiz_crs = as.character(field(f$attributes, "horiz_crs")), stringsAsFactors = FALSE))
 wu <- st_sf(do.call(rbind, attrs), geometry = st_sfc(lapply(features, as_poly), crs = 4326))
 wu <- st_make_valid(st_transform(wu, st_crs(holes)))
 wu$quality_level <- toupper(gsub("[^A-Za-z0-9]", "", wu$ql))
@@ -54,20 +55,29 @@ wu <- wu[wu$quality_level %in% keep_ql & !is.na(wu$lpc_link) & nzchar(wu$lpc_lin
 wu <- wu[lengths(st_intersects(wu, holes)) > 0, ]
 if (!nrow(wu)) stop("No supported work units intersect the holes.", call. = FALSE)
 
-# Work-unit delivery grids very rarely overlap. Keep each exact intersection
-# instead of repeatedly subtracting complex statewide polygons; this makes the
-# planning pass tractable. The final CSV retains workunit IDs for any later
-# source-priority review.
-pieces <- suppressWarnings(st_intersection(wu, holes))
-pieces <- pieces[as.numeric(st_area(pieces)) > 0, ]
+# Assign overlapping work units by the same contract as EPT: newest completed
+# acquisition first, with QL1 breaking equal-date ties. This prevents duplicate
+# downloads and makes the direct-LAZ and EPT paths scientifically consistent.
+wu <- wu[order(-ifelse(is.finite(wu$collect_end), wu$collect_end, -Inf), wu$quality_level != "QL1"), ]
+remaining <- st_geometry(holes)
+piece_rows <- list()
+for (i in seq_len(nrow(wu))) {
+  piece <- suppressWarnings(st_intersection(remaining, st_geometry(wu[i, ])))
+  if (!length(piece) || sum(as.numeric(st_area(piece))) < 1) next
+  piece_rows[[length(piece_rows) + 1L]] <- st_sf(st_drop_geometry(wu[i, ]), geometry = st_union(piece))
+  remaining <- suppressWarnings(st_difference(remaining, st_union(piece)))
+  if (!length(remaining) || sum(as.numeric(st_area(remaining))) < 1) break
+}
+pieces <- if (length(piece_rows)) do.call(rbind, piece_rows) else wu[0, ]
 if (!nrow(pieces)) stop("No supported work-unit area covers the holes.", call. = FALSE)
 message("Selected ", nrow(pieces), " work-unit coverage pieces for direct-LAZ planning.")
 
-local_names <- character()
+local_map <- setNames(character(), character())
 if (all(c("local-index", "local-layer") %in% names(opt))) {
   local <- st_read(opt[["local-index"]], layer = opt[["local-layer"]], quiet = TRUE)
   path_field <- if ("location" %in% names(local)) "location" else names(st_drop_geometry(local))[1]
-  local_names <- basename(local[[path_field]])
+  local_paths <- as.character(local[[path_field]])
+  local_map <- setNames(local_paths[!duplicated(basename(local_paths))], basename(local_paths)[!duplicated(basename(local_paths))])
 }
 read_inventory <- function(link) {
   u <- paste0(sub("/$", "", link), "/0_file_download_links.txt")
@@ -84,23 +94,33 @@ if (any(!pieces$inventory_urls)) {
 job_rows <- lapply(seq_len(nrow(pieces)), function(i) {
   urls <- inventories[[i]]; urls <- urls[grepl("\\.la[sz]$", urls, ignore.case = TRUE)]
   if (!length(urls)) return(NULL)
-  data.frame(source_id = i, workunit = pieces$workunit[i], project = pieces$project[i], quality_level = pieces$quality_level[i], horiz_crs = pieces$horiz_crs[i], url = urls, stringsAsFactors = FALSE)
+  data.frame(source_id = i, workunit = pieces$workunit[i], project = pieces$project[i], quality_level = pieces$quality_level[i],
+    acquisition_start = pieces$collect_start[i], acquisition_end = pieces$collect_end[i],
+    horiz_crs = pieces$horiz_crs[i], url = urls, stringsAsFactors = FALSE)
 })
 job_rows <- Filter(Negate(is.null), job_rows)
 if (!length(job_rows)) stop("Selected work units had no readable LAZ delivery links.", call. = FALSE)
 jobs <- do.call(rbind, job_rows)
 jobs$file_name <- basename(jobs$url)
-jobs <- jobs[!jobs$file_name %in% local_names, ]
-if (!nrow(jobs)) stop("All delivery tiles are already available locally.", call. = FALSE)
-message("Reading bounded headers for ", nrow(jobs), " candidate remote tiles (", workers, " workers).")
+jobs$local_path <- unname(local_map[jobs$file_name])
+message("Reading bounded headers for ", nrow(jobs), " candidate delivery tiles (", workers, " workers).")
 
-las_header <- function(url) tryCatch({
-  r <- curl_fetch_memory(url, handle = new_handle(range = "0-374", failonerror = TRUE))
-  h <- rawToChar(r$headers); total <- sub(".*[Cc]ontent-[Rr]ange: bytes [0-9]+-[0-9]+/([0-9]+).*", "\\1", h)
-  con <- rawConnection(r$content); on.exit(close(con)); get <- function(pos, what) { seek(con, pos); readBin(con, what, n = 1L, size = 8L, endian = "little") }
+las_header <- function(url, local_path = NA_character_) tryCatch({
+  if (!is.na(local_path) && nzchar(local_path) && file.exists(local_path)) {
+    con <- file(local_path, open = "rb"); on.exit(close(con))
+    total <- file.info(local_path)$size
+  } else {
+    r <- curl_fetch_memory(url, handle = new_handle(range = "0-374", failonerror = TRUE, maxfilesize_large = 1048576))
+    if (length(r$content) < 375L) stop("short LAS header")
+    h <- rawToChar(r$headers); total <- sub(".*[Cc]ontent-[Rr]ange: bytes [0-9]+-[0-9]+/([0-9]+).*", "\\1", h)
+    if (identical(total, h)) total <- NA_real_
+    con <- rawConnection(r$content); on.exit(close(con))
+  }
+  get <- function(pos, what) { seek(con, pos); readBin(con, what, n = 1L, size = 8L, endian = "little") }
   c(bytes = as.numeric(total), xmin = get(187, "double"), xmax = get(179, "double"), ymin = get(203, "double"), ymax = get(195, "double"))
 }, error = function(e) c(bytes = NA_real_, xmin = NA_real_, xmax = NA_real_, ymin = NA_real_, ymax = NA_real_))
-headers <- if (.Platform$OS.type == "unix" && workers > 1L) parallel::mclapply(jobs$url, las_header, mc.cores = workers) else lapply(jobs$url, las_header)
+header_args <- Map(list, jobs$url, jobs$local_path)
+headers <- if (.Platform$OS.type == "unix" && workers > 1L) parallel::mclapply(header_args, function(x) las_header(x[[1]], x[[2]]), mc.cores = workers) else lapply(header_args, function(x) las_header(x[[1]], x[[2]]))
 headers <- as.data.frame(do.call(rbind, headers))
 jobs <- cbind(jobs, headers)
 jobs <- jobs[is.finite(jobs$xmin) & jobs$xmax > jobs$xmin & jobs$ymax > jobs$ymin, ]
@@ -127,10 +147,30 @@ plan <- jobs[selected, ]
 plan$estimated_gib <- plan$bytes / 1024^3
 plan$source_url <- plan$url
 plan$url <- NULL
+epoch_date <- function(x) {
+  out <- rep(NA_character_, length(x)); ok <- is.finite(x)
+  out[ok] <- format(as.POSIXct(x[ok] / 1000, origin = "1970-01-01", tz = "UTC"), "%Y-%m-%d")
+  out
+}
+plan$acquisition_start <- epoch_date(plan$acquisition_start)
+plan$acquisition_end <- epoch_date(plan$acquisition_end)
+plan$acquisition_year <- suppressWarnings(as.integer(substr(plan$acquisition_end, 1, 4)))
 write.csv(plan, opt[["output"]], row.names = FALSE)
 summary <- aggregate(cbind(bytes, estimated_gib) ~ workunit + project + quality_level, plan, sum)
 summary_path <- paste0(tools::file_path_sans_ext(opt[["output"]]), "_summary.csv")
 write.csv(summary, summary_path, row.names = FALSE)
+footprints_path <- if ("footprints-output" %in% names(opt)) opt[["footprints-output"]] else paste0(tools::file_path_sans_ext(opt[["output"]]), "_tiles.gpkg")
+if (file.exists(footprints_path)) stop("Refusing to overwrite: ", footprints_path, call. = FALSE)
+tile_geometry <- lapply(seq_len(nrow(plan)), function(i) {
+  crs <- suppressWarnings(st_crs(as.integer(plan$horiz_crs[i])))
+  if (is.na(crs)) stop("Unreadable horizontal CRS for ", plan$workunit[i], ": ", plan$horiz_crs[i], call. = FALSE)
+  coords <- matrix(c(plan$xmin[i], plan$ymin[i], plan$xmax[i], plan$ymin[i], plan$xmax[i], plan$ymax[i], plan$xmin[i], plan$ymax[i], plan$xmin[i], plan$ymin[i]), ncol = 2, byrow = TRUE)
+  st_geometry(st_transform(st_sf(geometry = st_sfc(st_polygon(list(coords)), crs = crs)), st_crs(holes)))[[1]]
+})
+tile_fields <- plan[, setdiff(names(plan), c("xmin", "xmax", "ymin", "ymax")), drop = FALSE]
+tile_footprints <- st_sf(tile_fields, geometry = st_sfc(tile_geometry, crs = st_crs(holes)))
+st_write(tile_footprints, footprints_path, layer = "direct_laz_tiles", quiet = TRUE)
 message("Wrote ", nrow(plan), " required direct-LAZ tiles: ", opt[["output"]])
 message("Estimated download: ", round(sum(plan$estimated_gib), 1), " GiB; summary: ", summary_path)
+message("Wrote direct-LAZ tile footprints: ", footprints_path)
 message("Wrote delivery-inventory status: ", inventory_status_path)

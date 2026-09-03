@@ -53,7 +53,8 @@ for (i in seq_len(nrow(blocks))) {
     piece <- st_union(piece)
     rows[[length(rows) + 1L]] <- data.frame(
       block_id = paste(blocks$block_id[i], sources$ept_name[j], sep = "__"),
-      source_block_id = blocks$block_id[i], ept_name = sources$ept_name[j], ept_url = sources$ept_url[j],
+      source_block_id = blocks$block_id[i], source_type = "ept", source_name = sources$ept_name[j],
+      ept_name = sources$ept_name[j], ept_url = sources$ept_url[j], source_files = NA_character_, source_crs = NA_character_,
       quality_level = sources$quality_level[j], acquisition_start = sources$acquisition_start[j],
       acquisition_end = sources$acquisition_end[j], source_area_m2 = sum(as.numeric(st_area(piece))), stringsAsFactors = FALSE
     )

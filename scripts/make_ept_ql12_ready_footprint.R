@@ -4,7 +4,7 @@
 # a planning footprint: streamable EPT coverage that is also QL1 or QL2.
 suppressPackageStartupMessages({ library(sf); library(curl); library(jsonlite) })
 
-service <- "https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/8/query"
+service <- "https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/24/query"
 usage <- paste(
   "Usage: Rscript scripts/make_ept_ql12_ready_footprint.R --ept EPT.gpkg --layer NAME",
   "--aoi AOI.gpkg --aoi-layer NAME --output READY.gpkg [--not-ready-output FILE]",

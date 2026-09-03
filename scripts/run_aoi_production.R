@@ -8,7 +8,10 @@ usage <- paste(
   "Usage: Rscript scripts/run_aoi_production.R --aoi AOI.gpkg --layer NAME --name STEM",
   "--delivery-template DELIVERY_GRID.tif --normalized-dir DIR --metrics-dir DIR",
   "[--block-m 500] [--stream-workers 8] [--normalize-workers 48] [--metric-workers 64]",
-  "[--buffer-m 60] [--families standard,canopy,graph] [--filter-field FIELD --filter-value VALUE] [--ept-sources FILE --ept-source-layer NAME --ept-profiles FILE] [--write-normalized true|false] [--resume true|false] [--preflight-only true|false] [--pdal-bin PATH]",
+  "[--buffer-m 60] [--families standard,canopy,graph] [--filter-field FIELD --filter-value VALUE]",
+  "[--ept-sources FILE --ept-source-layer NAME --ept-profiles FILE]",
+  "[--direct-laz-plan PLAN.csv --direct-laz-tiles TILES.gpkg --direct-laz-cache-dir DIR]",
+  "[--download-workers 8] [--write-normalized true|false] [--resume true|false] [--preflight-only true|false] [--pdal-bin PATH]",
   sep = "\n"
 )
 args <- commandArgs(trailingOnly = TRUE)
@@ -33,6 +36,14 @@ jobs_path <- file.path(provenance_dir, paste0(name, "_jobs.gpkg"))
 jobs_layer <- paste0(name, "_jobs")
 coverage_path <- file.path(provenance_dir, paste0(name, "_jobs_coverage.gpkg"))
 resume <- is_true(opt_or("resume", "false"))
+direct_ept <- all(c("ept-sources", "ept-source-layer", "ept-profiles") %in% names(opts))
+direct_laz <- all(c("direct-laz-plan", "direct-laz-tiles", "direct-laz-cache-dir") %in% names(opts))
+if (any(c("ept-sources", "ept-source-layer", "ept-profiles") %in% names(opts)) && !direct_ept) {
+  stop("Provide all of --ept-sources, --ept-source-layer, and --ept-profiles.", call. = FALSE)
+}
+if (any(c("direct-laz-plan", "direct-laz-tiles", "direct-laz-cache-dir") %in% names(opts)) && !direct_laz) {
+  stop("Provide all of --direct-laz-plan, --direct-laz-tiles, and --direct-laz-cache-dir.", call. = FALSE)
+}
 
 run_r <- function(script, script_args, env = character()) {
   # system2() invokes a shell on this platform; quote values such as forest
@@ -53,6 +64,28 @@ if (file.exists(blocks_path)) {
   ))
 }
 
+# Tile acquisition is independent of the block manifest. Re-run it during a
+# resumed job so missing/previously interrupted source tiles are repaired.
+if (direct_laz && !preflight_only) {
+  run_r("scripts/download_direct_laz.R", c(
+    "--plan", opts[["direct-laz-plan"]], "--output-dir", opts[["direct-laz-cache-dir"]],
+    "--workers", opt_or("download-workers", opt_or("stream-workers", "8")), "--resume", opt_or("resume", "false")
+  ))
+}
+available_direct_laz <- FALSE
+if (direct_laz && !preflight_only) {
+  direct_plan <- read.csv(opts[["direct-laz-plan"]], stringsAsFactors = FALSE, na.strings = c("", "NA"))
+  available_direct_laz <- "local_path" %in% names(direct_plan) && any(!is.na(direct_plan$local_path) & nzchar(direct_plan$local_path) & file.exists(direct_plan$local_path))
+  if (!available_direct_laz) message("No direct-LAZ source tile is currently available; continuing with other source types.")
+}
+if (file.exists(jobs_path) && direct_laz && resume &&
+    "download_status" %in% names(direct_plan) && any(direct_plan$download_status == "downloaded")) {
+  message("New direct-LAZ tiles were acquired; rebuilding the unified job manifest.")
+  unlink(jobs_path)
+  direct_component <- file.path(provenance_dir, paste0(name, "_direct_laz_jobs.gpkg"))
+  if (file.exists(direct_component)) unlink(direct_component)
+}
+
 if (file.exists(jobs_path)) {
   if (!resume) stop("USGS job manifest already exists; use --resume true or choose a new --name: ", jobs_path, call. = FALSE)
   message("Reusing USGS job manifest: ", jobs_path)
@@ -60,21 +93,41 @@ if (file.exists(jobs_path)) {
     stop("The existing job manifest predates coverage footprints. Choose a new --name for a fresh preflight.", call. = FALSE)
   }
 } else {
-  direct_ept <- all(c("ept-sources", "ept-source-layer", "ept-profiles") %in% names(opts))
-  if (any(c("ept-sources", "ept-source-layer", "ept-profiles") %in% names(opts)) && !direct_ept) {
-    stop("Provide all of --ept-sources, --ept-source-layer, and --ept-profiles.", call. = FALSE)
-  }
+  component_paths <- character()
   if (direct_ept) {
-    run_r("scripts/make_ept_source_job_manifest.R", c(
+    ept_jobs_path <- file.path(provenance_dir, paste0(name, "_ept_jobs.gpkg"))
+    if (!file.exists(ept_jobs_path)) {
+      run_r("scripts/make_ept_source_job_manifest.R", c(
+        "--blocks", blocks_path, "--layer", blocks_layer,
+        "--ept-sources", opts[["ept-sources"]], "--ept-layer", opts[["ept-source-layer"]], "--profiles", opts[["ept-profiles"]],
+        "--output", ept_jobs_path, "--output-layer", "ept_jobs"
+      ))
+    } else message("Reusing EPT component manifest: ", ept_jobs_path)
+    component_paths <- c(component_paths, ept_jobs_path)
+  }
+  if (available_direct_laz) {
+    direct_jobs_path <- file.path(provenance_dir, paste0(name, "_direct_laz_jobs.gpkg"))
+    run_r("scripts/make_direct_laz_job_manifest.R", c(
       "--blocks", blocks_path, "--layer", blocks_layer,
-      "--ept-sources", opts[["ept-sources"]], "--ept-layer", opts[["ept-source-layer"]], "--profiles", opts[["ept-profiles"]],
-      "--output", jobs_path, "--output-layer", jobs_layer
+      "--tiles", opts[["direct-laz-tiles"]], "--tile-layer", "direct_laz_tiles",
+      "--plan", opts[["direct-laz-plan"]], "--buffer-m", opt_or("buffer-m", "60"),
+      "--output", direct_jobs_path, "--output-layer", "direct_laz_jobs"
     ))
-  } else {
+    component_paths <- c(component_paths, direct_jobs_path)
+  }
+  if (length(component_paths)) {
+    components <- lapply(seq_along(component_paths), function(i) st_read(component_paths[i], quiet = TRUE))
+    jobs <- do.call(rbind, components)
+    st_write(jobs, jobs_path, layer = jobs_layer, quiet = TRUE)
+    write.csv(st_drop_geometry(jobs), paste0(tools::file_path_sans_ext(jobs_path), "_manifest.csv"), row.names = FALSE)
+    message("Wrote ", nrow(jobs), " unified source jobs: ", jobs_path)
+  } else if (!direct_ept && !direct_laz) {
     run_r("scripts/make_usgs_job_manifest.R", c(
       "--blocks", blocks_path, "--layer", blocks_layer,
       "--output", jobs_path, "--output-layer", jobs_layer
     ))
+  } else if (!length(component_paths)) {
+    stop("No EPT or acquired direct-LAZ job is available to process; inspect provenance and the direct-LAZ plan.", call. = FALSE)
   }
 }
 

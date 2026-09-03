@@ -9,7 +9,9 @@ suppressPackageStartupMessages({
   library(jsonlite)
 })
 
-service <- "https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/8/query"
+# Layer 24 is the service's query-optimized LPC layer. Layer 8 is the display
+# layer and currently returns "Failed to execute query" for valid AOI requests.
+service <- "https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/24/query"
 usage <- "Usage: Rscript scripts/resolve_usgs_lpc.R --aoi FILE --layer NAME [--output FILE]"
 args <- commandArgs(trailingOnly = TRUE)
 if (!length(args) || length(args) %% 2L != 0L) stop(usage, call. = FALSE)
