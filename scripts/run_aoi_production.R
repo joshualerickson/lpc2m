@@ -108,6 +108,15 @@ ept_jobs_path <- file.path(provenance_dir, paste0(name, "_ept_jobs.gpkg"))
 ept_preprocessed <- FALSE
 download_job <- NULL
 overlap_ept_download <- is_true(opt_or("overlap-ept-download", "true"))
+# EPT availability is live and can change between resumes.  A manifest created
+# before live discovery (or by a direct-only retry) must not suppress newly
+# eligible EPT jobs. Rebuilding it is safe because run_block_test resumes all
+# completed normalized/metric outputs by their stable source-specific IDs.
+if (direct_ept && file.exists(jobs_path)) {
+  message("Refreshing source job manifest to include current live EPT coverage.")
+  unlink(jobs_path)
+  if (file.exists(ept_jobs_path)) unlink(ept_jobs_path)
+}
 if (!preflight_only && overlap_ept_download && direct_ept && direct_laz && !file.exists(jobs_path)) {
   if (!file.exists(ept_jobs_path)) {
     run_r("scripts/make_ept_source_job_manifest.R", c(
