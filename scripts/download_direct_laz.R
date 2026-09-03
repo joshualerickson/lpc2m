@@ -24,13 +24,18 @@ if (is.na(workers) || workers < 1L || is.na(retries) || retries < 1L) stop("work
 plan <- read.csv(opt[["plan"]], stringsAsFactors = FALSE, na.strings = c("", "NA"))
 required <- c("workunit", "source_url", "file_name", "bytes")
 if (!all(required %in% names(plan))) stop("Direct-LAZ plan must contain: ", paste(required, collapse = ", "), call. = FALSE)
+## Older provenance plans were written before local_path was introduced. Treat
+## them as download-required instead of allowing a NULL column to reach
+## file.exists(), which aborts an otherwise resumable mixed-source run.
+if (!"local_path" %in% names(plan)) plan$local_path <- rep(NA_character_, nrow(plan))
+plan$local_path <- as.character(plan$local_path)
 if (!nrow(plan)) {
   message("Direct-LAZ plan is empty; nothing to download.")
   quit(status = 0L)
 }
 safe_component <- function(x) gsub("[^A-Za-z0-9._-]", "_", x)
 target <- file.path(normalizePath(opt[["output-dir"]], mustWork = FALSE), safe_component(plan$workunit), plan$file_name)
-local_supplied <- "local_path" %in% names(plan) & !is.na(plan$local_path) & nzchar(plan$local_path) & file.exists(plan$local_path)
+local_supplied <- !is.na(plan$local_path) & nzchar(plan$local_path) & file.exists(plan$local_path)
 target[local_supplied] <- normalizePath(plan$local_path[local_supplied], mustWork = TRUE)
 
 download_one <- function(i) {
